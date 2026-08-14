@@ -1,1 +1,12 @@
-
+{
+  "name": "twitter-video-downloader",
+  "version": "1.0.0",
+  "description": "Mobile X/Twitter video downloader",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
