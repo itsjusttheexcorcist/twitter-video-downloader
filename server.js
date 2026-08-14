@@ -25,7 +25,7 @@ function validTwitterUrl(value) {
   }
 }
 
-app.post("/api/download", async (req, res) => {
+app.post("/api/download", (req, res) => {
   const url = req.body?.url;
 
   if (!url || !validTwitterUrl(url)) {
@@ -35,48 +35,44 @@ app.post("/api/download", async (req, res) => {
   }
 
   const tempDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "twitter-video-")
+    path.join(os.tmpdir(), "twt-download-")
   );
-
-  const outputTemplate = path.join(tempDir, "video.%(ext)s");
 
   console.log("Downloading:", url);
 
-  const args = [
-    "--no-playlist",
+  // twt-dl-cli accepts the URL as its command-line argument.
+  const downloader = spawn(
+    "npx",
+    [
+      "--yes",
+      "twt-dl-cli@latest",
+      url
+    ],
+    {
+      cwd: tempDir,
+      env: {
+        ...process.env
+      }
+    }
+  );
 
-    // Highest available video + highest available audio.
-    // Fall back to the best combined format if separate streams
-    // aren't available.
-    "--format",
-    "bv*+ba/b",
+  let output = "";
+  let errorOutput = "";
 
-    // Put the final result into an MP4 container.
-    "--merge-output-format",
-    "mp4",
-
-    // Remux to MP4 when necessary.
-    "--remux-video",
-    "mp4",
-
-    "--output",
-    outputTemplate,
-
-    url
-  ];
-
-  const downloader = spawn("yt-dlp", args);
-
-  let stderr = "";
+  downloader.stdout.on("data", (data) => {
+    const text = data.toString();
+    output += text;
+    console.log(text);
+  });
 
   downloader.stderr.on("data", (data) => {
     const text = data.toString();
-    stderr += text;
+    errorOutput += text;
     console.log(text);
   });
 
   downloader.on("error", (error) => {
-    console.error("Failed to start yt-dlp:", error);
+    console.error("Downloader failed to start:", error);
 
     cleanup();
 
@@ -88,59 +84,90 @@ app.post("/api/download", async (req, res) => {
   });
 
   downloader.on("close", (code) => {
+    console.log("twt-dl-cli exited with:", code);
+
     if (code !== 0) {
-      console.error("yt-dlp exited with code:", code);
-      console.error(stderr);
+      console.error(errorOutput);
 
       cleanup();
 
       if (!res.headersSent) {
         res.status(500).json({
           error:
-            "X/Twitter could not provide this video. Try another public post."
+            "The video could not be downloaded. Try another public X post."
         });
       }
 
       return;
     }
 
-    // Find the finished video.
-    const files = fs.readdirSync(tempDir);
+    let files;
 
-    const videoFile = files
-      .filter((file) => /\.(mp4|m4v|mov|webm|mkv)$/i.test(file))
-      .map((file) => path.join(tempDir, file))
-      .find((file) => fs.statSync(file).size > 0);
-
-    if (!videoFile) {
-      console.error("yt-dlp completed but no video was produced.");
+    try {
+      files = fs.readdirSync(tempDir);
+    } catch (error) {
+      console.error(error);
       cleanup();
 
-      if (!res.headersSent) {
-        res.status(500).json({
-          error: "The video was found, but no downloadable file was produced."
-        });
-      }
-
-      return;
+      return res.status(500).json({
+        error: "Could not read the downloaded file."
+      });
     }
 
+    console.log("Files created:", files);
+
+    // Find the largest video file produced by twt-dl-cli.
+    const videoFiles = files
+      .map((file) => path.join(tempDir, file))
+      .filter((file) => {
+        try {
+          return (
+            fs.statSync(file).isFile() &&
+            /\.(mp4|m4v|mov|webm|mkv)$/i.test(file)
+          );
+        } catch {
+          return false;
+        }
+      });
+
+    if (videoFiles.length === 0) {
+      console.error(
+        "No video file found.",
+        output,
+        errorOutput
+      );
+
+      cleanup();
+
+      return res.status(500).json({
+        error:
+          "The downloader ran, but did not produce a video file."
+      });
+    }
+
+    // If multiple files exist, use the largest one.
+    videoFiles.sort(
+      (a, b) =>
+        fs.statSync(b).size - fs.statSync(a).size
+    );
+
+    const videoFile = videoFiles[0];
     const fileSize = fs.statSync(videoFile).size;
 
+    if (fileSize === 0) {
+      cleanup();
+
+      return res.status(500).json({
+        error: "The downloaded video was empty."
+      });
+    }
+
     console.log(
-      `Download successful: ${(fileSize / 1024 / 1024).toFixed(2)} MB`
+      `Video found: ${(fileSize / 1024 / 1024).toFixed(2)} MB`
     );
 
-    res.setHeader(
-      "Content-Type",
-      "video/mp4"
-    );
-
-    res.setHeader(
-      "Content-Length",
-      fileSize
-    );
-
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", fileSize);
     res.setHeader(
       "Content-Disposition",
       'attachment; filename="X-video.mp4"'
@@ -153,7 +180,7 @@ app.post("/api/download", async (req, res) => {
     stream.on("close", cleanup);
 
     stream.on("error", (error) => {
-      console.error("File streaming error:", error);
+      console.error("Streaming error:", error);
       cleanup();
     });
   });
